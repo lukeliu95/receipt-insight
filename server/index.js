@@ -1,10 +1,9 @@
 import express from 'express';
 import cors from 'cors';
-import multer from 'multer';
 import path from 'path';
 import fs from 'fs-extra';
 import { fileURLToPath } from 'url';
-import db from './db.js';
+import db, { initDB } from './db.js';
 import dayjs from 'dayjs';
 import { hashPassword, comparePassword, generateToken, authMiddleware, generateId } from './auth.js';
 
@@ -15,16 +14,35 @@ const app = express();
 const PORT = 3001;
 
 const isVercel = process.env.VERCEL === '1';
+const isProduction = !!process.env.TURSO_DATABASE_URL;
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); // Support large base64 payloads if needed
+app.use(express.json({ limit: '50mb' }));
 
-if (isVercel) {
-    // In Vercel, serve from /tmp/uploads where we write files
-    app.use('/uploads', express.static(path.join('/tmp', 'uploads')));
-} else {
+// Static uploads (local dev only)
+if (!isProduction) {
     app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 }
+
+// Initialize DB before handling requests
+let dbReady = false;
+const ensureDB = async () => {
+    if (!dbReady) {
+        await initDB();
+        dbReady = true;
+    }
+};
+
+// Middleware: ensure DB is initialized
+app.use(async (req, res, next) => {
+    try {
+        await ensureDB();
+        next();
+    } catch (error) {
+        console.error('[DB Init Error]', error);
+        res.status(500).json({ error: 'Database initialization failed' });
+    }
+});
 
 // ==================== AUTH ROUTES ====================
 
@@ -41,25 +59,22 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ error: 'Password must be at least 6 characters' });
         }
 
-        // Check if user exists
-        const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-        if (existingUser) {
+        const existing = await db.execute({ sql: 'SELECT id FROM users WHERE email = ?', args: [email] });
+        if (existing.rows.length > 0) {
             return res.status(400).json({ error: 'Email already registered' });
         }
 
-        // Create user
         const id = generateId();
         const passwordHash = await hashPassword(password);
         const createdAt = new Date().toISOString();
 
-        db.prepare('INSERT INTO users (id, email, passwordHash, createdAt) VALUES (?, ?, ?, ?)').run(id, email, passwordHash, createdAt);
+        await db.execute({
+            sql: 'INSERT INTO users (id, email, passwordHash, createdAt) VALUES (?, ?, ?, ?)',
+            args: [id, email, passwordHash, createdAt]
+        });
 
         const token = generateToken(id);
-
-        res.json({
-            user: { id, email, createdAt },
-            token
-        });
+        res.json({ user: { id, email, createdAt }, token });
     } catch (error) {
         console.error('Register error:', error);
         res.status(500).json({ error: 'Registration failed' });
@@ -75,14 +90,16 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ error: 'Email and password are required' });
         }
 
-        // Debug: Check if DB is empty (Vercel Reset Check)
-        const userCount = db.prepare('SELECT count(*) as count FROM users').get().count;
+        const countResult = await db.execute('SELECT count(*) as count FROM users');
+        const userCount = countResult.rows[0].count;
         console.log(`[Login Attempt] Email: ${email}, Total Users in DB: ${userCount}`);
 
-        const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+        const result = await db.execute({ sql: 'SELECT * FROM users WHERE email = ?', args: [email] });
+        const user = result.rows[0];
+
         if (!user) {
             if (userCount === 0) {
-                return res.status(401).json({ error: 'Database is empty (Vercel Reset). Please register again.' });
+                return res.status(401).json({ error: 'Database is empty. Please register first.' });
             }
             return res.status(401).json({ error: 'User not found. Please register.' });
         }
@@ -93,7 +110,6 @@ app.post('/api/auth/login', async (req, res) => {
         }
 
         const token = generateToken(user.id);
-
         res.json({
             user: { id: user.id, email: user.email, createdAt: user.createdAt },
             token
@@ -105,8 +121,9 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // Get current user
-app.get('/api/auth/me', authMiddleware, (req, res) => {
-    const user = db.prepare('SELECT id, email, createdAt FROM users WHERE id = ?').get(req.userId);
+app.get('/api/auth/me', authMiddleware, async (req, res) => {
+    const result = await db.execute({ sql: 'SELECT id, email, createdAt FROM users WHERE id = ?', args: [req.userId] });
+    const user = result.rows[0];
     if (!user) {
         return res.status(404).json({ error: 'User not found' });
     }
@@ -115,101 +132,92 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
 
 // ==================== RECEIPT ROUTES (Protected) ====================
 
-// Configure Storage Engine for Multer (Direct Image Upload)
-// Note: In our current app flow, we might be sending Base64 from the frontend, 
-// OR we can switch to FormData. For simplicity with the existing "MagicScan", 
-// we'll accept JSON with Base64 first, then write to disk.
-// BUT, to follow "build folder save picture" rigorously:
-
+// Save image to disk (local dev only)
 const saveImageToDisk = async (base64Data, dateStr) => {
-    // Parse Date to YYYY/MM/DD
     const date = dayjs(dateStr);
-    const year = date.format('YYYY');
-    const month = date.format('MM');
-    const day = date.format('DD');
-
-    const isVercel = process.env.VERCEL === '1';
-    const baseDir = isVercel ? '/tmp/uploads' : path.join(__dirname, '../uploads');
-
-    const dir = path.join(baseDir, `${year}/${month}/${day}`);
+    const dir = path.join(__dirname, '../uploads', date.format('YYYY'), date.format('MM'), date.format('DD'));
     await fs.ensureDir(dir);
 
-    const fileName = `receipt_${Date.now()}.webp`; // Using webp or jpg
+    const fileName = `receipt_${Date.now()}.webp`;
     const filePath = path.join(dir, fileName);
 
-    // Remove header if present
     const base64Image = base64Data.replace(/^data:image\/\w+;base64,/, "");
     await fs.writeFile(filePath, base64Image, 'base64');
 
-    // Return the relative path for the DB, served via static middleware
-    // URL format: /uploads/YYYY/MM/DD/filename
-    return `/uploads/${year}/${month}/${day}/${fileName}`;
+    return `/uploads/${date.format('YYYY')}/${date.format('MM')}/${date.format('DD')}/${fileName}`;
 };
 
-// API: Get All Receipts (Protected - only user's receipts)
-app.get('/api/receipts', authMiddleware, (req, res) => {
-    const receipts = db.prepare('SELECT * FROM receipts WHERE userId = ? ORDER BY date DESC').all(req.userId);
-    const receiptIds = receipts.map(r => r.id);
+// Get All Receipts
+app.get('/api/receipts', authMiddleware, async (req, res) => {
+    try {
+        const receiptsResult = await db.execute({
+            sql: 'SELECT * FROM receipts WHERE userId = ? ORDER BY date DESC',
+            args: [req.userId]
+        });
+        const receipts = receiptsResult.rows;
+        const receiptIds = receipts.map(r => r.id);
 
-    let items = [];
-    if (receiptIds.length > 0) {
-        const placeholders = receiptIds.map(() => '?').join(',');
-        items = db.prepare(`SELECT * FROM items WHERE receiptId IN (${placeholders})`).all(...receiptIds);
+        let items = [];
+        if (receiptIds.length > 0) {
+            const placeholders = receiptIds.map(() => '?').join(',');
+            const itemsResult = await db.execute({
+                sql: `SELECT * FROM items WHERE receiptId IN (${placeholders})`,
+                args: receiptIds
+            });
+            items = itemsResult.rows;
+        }
+
+        const receiptsWithItems = receipts.map(r => ({
+            ...r,
+            items: items.filter(i => i.receiptId === r.id)
+        }));
+
+        res.json(receiptsWithItems);
+    } catch (error) {
+        console.error('Get receipts error:', error);
+        res.status(500).json({ error: error.message });
     }
-
-    // Join items to receipts
-    const receiptsWithItems = receipts.map(r => ({
-        ...r,
-        items: items.filter(i => i.receiptId === r.id)
-    }));
-
-    res.json(receiptsWithItems);
 });
 
-// API: Save Receipt (Protected - associate with user)
+// Save Receipt
 app.post('/api/receipts', authMiddleware, async (req, res) => {
     try {
         const { id, storeName, date, total, currency, items, status, createdAt, imageUrl, analysis } = req.body;
 
         let savedImageUrl = "";
         if (imageUrl && imageUrl.startsWith('data:')) {
-            savedImageUrl = await saveImageToDisk(imageUrl, date);
+            if (isProduction) {
+                // Production: store base64 directly in DB (no ephemeral disk)
+                savedImageUrl = imageUrl;
+            } else {
+                savedImageUrl = await saveImageToDisk(imageUrl, date);
+            }
         } else {
             savedImageUrl = imageUrl;
         }
 
-        const upsertReceipt = db.prepare(`
-            INSERT INTO receipts (id, userId, storeName, date, total, currency, imageUrl, status, createdAt, analysis)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                storeName = excluded.storeName,
-                date = excluded.date,
-                total = excluded.total,
-                currency = excluded.currency,
-                imageUrl = excluded.imageUrl,
-                status = excluded.status,
-                analysis = excluded.analysis
-        `);
+        await db.execute({
+            sql: `INSERT INTO receipts (id, userId, storeName, date, total, currency, imageUrl, status, createdAt, analysis)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  ON CONFLICT(id) DO UPDATE SET
+                      storeName = excluded.storeName,
+                      date = excluded.date,
+                      total = excluded.total,
+                      currency = excluded.currency,
+                      imageUrl = excluded.imageUrl,
+                      status = excluded.status,
+                      analysis = excluded.analysis`,
+            args: [id, req.userId, storeName, date, total, currency, savedImageUrl, status, createdAt || new Date().toISOString(), analysis || null]
+        });
 
-        upsertReceipt.run(id, req.userId, storeName, date, total, currency, savedImageUrl, status, createdAt || new Date().toISOString(), analysis || null);
-
-        // Insert Items
-        const insertItem = db.prepare(`
-            INSERT INTO items (id, receiptId, name, price, description, nutrition, details)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                price = excluded.price,
-                description = excluded.description,
-                nutrition = excluded.nutrition,
-                details = excluded.details
-        `);
-
-        const deleteItems = db.prepare('DELETE FROM items WHERE receiptId = ?');
-        deleteItems.run(id); // Clear old items if updating
+        // Clear old items then insert new ones
+        await db.execute({ sql: 'DELETE FROM items WHERE receiptId = ?', args: [id] });
 
         for (const item of items) {
-            insertItem.run(item.id, id, item.name, item.price, item.description, item.nutrition, item.details);
+            await db.execute({
+                sql: `INSERT INTO items (id, receiptId, name, price, description, nutrition, details) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                args: [item.id, id, item.name, item.price, item.description, item.nutrition, item.details]
+            });
         }
 
         res.json({ success: true, imageUrl: savedImageUrl });
@@ -219,12 +227,12 @@ app.post('/api/receipts', authMiddleware, async (req, res) => {
     }
 });
 
-// API: Delete Receipt (Protected - ownership check)
-app.delete('/api/receipts/:id', authMiddleware, (req, res) => {
+// Delete Receipt
+app.delete('/api/receipts/:id', authMiddleware, async (req, res) => {
     const { id } = req.params;
 
-    // Check ownership
-    const receipt = db.prepare('SELECT userId FROM receipts WHERE id = ?').get(id);
+    const result = await db.execute({ sql: 'SELECT userId FROM receipts WHERE id = ?', args: [id] });
+    const receipt = result.rows[0];
     if (!receipt) {
         return res.status(404).json({ error: 'Receipt not found' });
     }
@@ -232,43 +240,38 @@ app.delete('/api/receipts/:id', authMiddleware, (req, res) => {
         return res.status(403).json({ error: 'Not authorized to delete this receipt' });
     }
 
-    db.prepare('DELETE FROM items WHERE receiptId = ?').run(id);
-    db.prepare('DELETE FROM receipts WHERE id = ?').run(id);
+    await db.execute({ sql: 'DELETE FROM items WHERE receiptId = ?', args: [id] });
+    await db.execute({ sql: 'DELETE FROM receipts WHERE id = ?', args: [id] });
     res.json({ success: true });
 });
 
 // ==================== REPORT ROUTES (Protected) ====================
 
-const getReportsDir = (userId) => {
-    const baseDir = isVercel ? '/tmp' : path.join(__dirname, '../data');
-    return path.join(baseDir, 'reports', userId);
-};
-
-// GET /api/reports/:period - 读取已保存的报告
+// GET /api/reports/:period
 app.get('/api/reports/:period', authMiddleware, async (req, res) => {
     const { period } = req.params;
     if (!['week', 'month', 'all'].includes(period)) {
         return res.status(400).json({ error: 'Invalid period' });
     }
 
-    const dir = getReportsDir(req.userId);
-    const filePath = path.join(dir, `report-${period}.md`);
-
     try {
-        const exists = await fs.pathExists(filePath);
-        if (!exists) {
-            return res.json({ content: null, updatedAt: null });
+        const result = await db.execute({
+            sql: 'SELECT content, updatedAt FROM reports WHERE userId = ? AND period = ?',
+            args: [req.userId, period]
+        });
+        const report = result.rows[0];
+        if (report) {
+            res.json({ content: report.content, updatedAt: report.updatedAt });
+        } else {
+            res.json({ content: null, updatedAt: null });
         }
-        const content = await fs.readFile(filePath, 'utf-8');
-        const stat = await fs.stat(filePath);
-        res.json({ content, updatedAt: stat.mtime.toISOString() });
     } catch (error) {
         console.error('Read report error:', error);
         res.json({ content: null, updatedAt: null });
     }
 });
 
-// POST /api/reports/:period - 保存报告为 md 文件
+// POST /api/reports/:period
 app.post('/api/reports/:period', authMiddleware, async (req, res) => {
     const { period } = req.params;
     if (!['week', 'month', 'all'].includes(period)) {
@@ -280,14 +283,14 @@ app.post('/api/reports/:period', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: 'Content is required' });
     }
 
-    const dir = getReportsDir(req.userId);
-    await fs.ensureDir(dir);
-    const filePath = path.join(dir, `report-${period}.md`);
-
     try {
-        await fs.writeFile(filePath, content, 'utf-8');
-        const stat = await fs.stat(filePath);
-        res.json({ success: true, updatedAt: stat.mtime.toISOString() });
+        const updatedAt = new Date().toISOString();
+        await db.execute({
+            sql: `INSERT INTO reports (userId, period, content, updatedAt) VALUES (?, ?, ?, ?)
+                  ON CONFLICT(userId, period) DO UPDATE SET content = excluded.content, updatedAt = excluded.updatedAt`,
+            args: [req.userId, period, content, updatedAt]
+        });
+        res.json({ success: true, updatedAt });
     } catch (error) {
         console.error('Save report error:', error);
         res.status(500).json({ error: 'Failed to save report' });
@@ -298,9 +301,10 @@ app.post('/api/reports/:period', authMiddleware, async (req, res) => {
 export default app;
 
 // Only start the server if not running in Vercel
-// Vercel sets the process.env.VERCEL environment variable
 if (!process.env.VERCEL) {
-    app.listen(PORT, () => {
-        console.log(`Server running on http://localhost:${PORT}`);
+    ensureDB().then(() => {
+        app.listen(PORT, () => {
+            console.log(`Server running on http://localhost:${PORT}`);
+        });
     });
 }
