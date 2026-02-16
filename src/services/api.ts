@@ -66,12 +66,7 @@ export const api = {
             throw new Error(`Failed to fetch receipts (${res.status}): ${text.slice(0, 100)}`);
         }
 
-        const data = await handleResponse(res);
-        // Fix image URLs to be full paths if relative
-        return data.map((r: any) => ({
-            ...r,
-            imageUrl: r.imageUrl?.startsWith('/uploads') ? `${UPLOAD_BASE}${r.imageUrl}` : r.imageUrl
-        }));
+        return handleResponse(res);
     },
 
     // Save a receipt (create or update)
@@ -82,6 +77,15 @@ export const api = {
             body: JSON.stringify(receipt)
         });
         return handleResponse(res);
+    },
+
+    // Get receipt image (lazy load)
+    async getReceiptImage(id: string): Promise<string | null> {
+        const res = await fetch(`${API_BASE}/receipts/${id}/image`, {
+            headers: { ...getAuthHeaders() },
+        });
+        const data = await handleResponse(res);
+        return data.imageUrl || null;
     },
 
     // Delete

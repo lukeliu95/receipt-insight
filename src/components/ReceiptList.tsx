@@ -227,13 +227,9 @@ export function ReceiptList({ receipts, onReceiptClick, onReprocess }: ReceiptLi
                                                 </div>
                                             )}
 
-                                            {/* 左侧图标/缩略图 */}
-                                            <div className="w-11 h-11 rounded-xl bg-primary/5 flex items-center justify-center shrink-0 overflow-hidden">
-                                                {receipt.imageUrl ? (
-                                                    <img src={receipt.imageUrl} alt="" className="w-full h-full object-cover" />
-                                                ) : (
-                                                    <span className="text-lg">🧾</span>
-                                                )}
+                                            {/* 左侧图标 */}
+                                            <div className="w-11 h-11 rounded-xl bg-primary/5 flex items-center justify-center shrink-0">
+                                                <span className="text-lg">🧾</span>
                                             </div>
 
                                             {/* 中间信息 */}

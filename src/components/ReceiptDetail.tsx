@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { Receipt } from '../types';
-import { ArrowLeft, Leaf, Trash2, X, Maximize2 } from 'lucide-react';
+import { ArrowLeft, Leaf, Trash2, X, Maximize2, ImageIcon } from 'lucide-react';
 import { useReceiptStore } from '../store/useReceiptStore';
 import { api } from '../services/api';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -17,6 +17,25 @@ export function ReceiptDetail({ receipt, onClose }: ReceiptDetailProps) {
     const [isImageZoomed, setIsImageZoomed] = useState(false);
     const [analysis, setAnalysis] = useState(receipt.analysis || '');
     const [loadingAnalysis, setLoadingAnalysis] = useState(false);
+
+    // Lazy load image
+    const [imageUrl, setImageUrl] = useState<string | null>(null);
+    const [imageLoading, setImageLoading] = useState(false);
+    const [imageRequested, setImageRequested] = useState(false);
+
+    const loadImage = async () => {
+        if (imageUrl || imageLoading) return;
+        setImageLoading(true);
+        setImageRequested(true);
+        try {
+            const url = await api.getReceiptImage(receipt.id);
+            setImageUrl(url);
+        } catch (e) {
+            console.error('Failed to load image:', e);
+        } finally {
+            setImageLoading(false);
+        }
+    };
 
     const handleDelete = async () => {
         if (confirm('确定要删除这张小票吗？')) {
@@ -86,15 +105,30 @@ export function ReceiptDetail({ receipt, onClose }: ReceiptDetailProps) {
 
                 {/* Scrollable */}
                 <div className="flex-1 overflow-y-auto">
-                    {/* 图片 */}
-                    {receipt.imageUrl && (
-                        <div className="relative h-48 bg-stone-50" onClick={() => setIsImageZoomed(true)}>
-                            <img src={receipt.imageUrl} alt="" className="w-full h-full object-contain" />
-                            <button className="absolute bottom-3 right-3 p-1.5 bg-black/60 rounded-full text-white">
-                                <Maximize2 className="w-4 h-4" />
+                    {/* 图片区域：点击加载 */}
+                    <div className="relative h-48 bg-stone-50 flex items-center justify-center">
+                        {imageUrl ? (
+                            <div className="w-full h-full" onClick={() => setIsImageZoomed(true)}>
+                                <img src={imageUrl} alt="" className="w-full h-full object-contain" />
+                                <button className="absolute bottom-3 right-3 p-1.5 bg-black/60 rounded-full text-white">
+                                    <Maximize2 className="w-4 h-4" />
+                                </button>
+                            </div>
+                        ) : imageLoading ? (
+                            <div className="flex flex-col items-center gap-2 text-stone-400">
+                                <div className="w-6 h-6 border-2 border-stone-300 border-t-primary rounded-full animate-spin" />
+                                <span className="text-xs">加载图片中...</span>
+                            </div>
+                        ) : (
+                            <button
+                                onClick={loadImage}
+                                className="flex flex-col items-center gap-2 text-stone-400 active:text-primary transition-colors"
+                            >
+                                <ImageIcon className="w-8 h-8" />
+                                <span className="text-xs font-medium">点击查看小票原图</span>
                             </button>
-                        </div>
-                    )}
+                        )}
+                    </div>
 
                     <div className="p-5 space-y-5">
                         {/* 主要信息 */}
@@ -167,7 +201,7 @@ export function ReceiptDetail({ receipt, onClose }: ReceiptDetailProps) {
 
             {/* Image Zoom */}
             <AnimatePresence>
-                {isImageZoomed && receipt.imageUrl && (
+                {isImageZoomed && imageUrl && (
                     <div className="fixed inset-0 z-[60] bg-black/95 flex items-center justify-center" onClick={() => setIsImageZoomed(false)}>
                         <button className="absolute top-6 right-6 p-3 bg-white/10 rounded-full text-white">
                             <X className="w-5 h-5" />
@@ -176,7 +210,7 @@ export function ReceiptDetail({ receipt, onClose }: ReceiptDetailProps) {
                             initial={{ scale: 0.8, opacity: 0 }}
                             animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.8, opacity: 0 }}
-                            src={receipt.imageUrl}
+                            src={imageUrl}
                             alt=""
                             className="max-w-full max-h-full object-contain"
                         />

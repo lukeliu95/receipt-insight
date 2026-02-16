@@ -148,11 +148,11 @@ const saveImageToDisk = async (base64Data, dateStr) => {
     return `/uploads/${date.format('YYYY')}/${date.format('MM')}/${date.format('DD')}/${fileName}`;
 };
 
-// Get All Receipts
+// Get All Receipts (without imageUrl to reduce payload)
 app.get('/api/receipts', authMiddleware, async (req, res) => {
     try {
         const receiptsResult = await db.execute({
-            sql: 'SELECT * FROM receipts WHERE userId = ? ORDER BY date DESC',
+            sql: 'SELECT id, userId, storeName, date, total, currency, status, createdAt, analysis, imageHash FROM receipts WHERE userId = ? ORDER BY date DESC',
             args: [req.userId]
         });
         const receipts = receiptsResult.rows;
@@ -176,6 +176,24 @@ app.get('/api/receipts', authMiddleware, async (req, res) => {
         res.json(receiptsWithItems);
     } catch (error) {
         console.error('Get receipts error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get Receipt Image (lazy load)
+app.get('/api/receipts/:id/image', authMiddleware, async (req, res) => {
+    try {
+        const result = await db.execute({
+            sql: 'SELECT imageUrl, userId FROM receipts WHERE id = ?',
+            args: [req.params.id]
+        });
+        const receipt = result.rows[0];
+        if (!receipt) return res.status(404).json({ error: 'Receipt not found' });
+        if (receipt.userId !== req.userId) return res.status(403).json({ error: 'Forbidden' });
+
+        res.json({ imageUrl: receipt.imageUrl || null });
+    } catch (error) {
+        console.error('Get image error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -327,8 +345,11 @@ app.post('/api/receipts/:id/process', authMiddleware, async (req, res) => {
             });
         }
 
-        // Fetch the complete updated receipt
-        const updatedResult = await db.execute({ sql: 'SELECT * FROM receipts WHERE id = ?', args: [finalId] });
+        // Fetch the complete updated receipt (without imageUrl)
+        const updatedResult = await db.execute({
+            sql: 'SELECT id, userId, storeName, date, total, currency, status, createdAt, analysis, imageHash FROM receipts WHERE id = ?',
+            args: [finalId]
+        });
         const itemsResult = await db.execute({ sql: 'SELECT * FROM items WHERE receiptId = ?', args: [finalId] });
 
         const finalReceipt = {
