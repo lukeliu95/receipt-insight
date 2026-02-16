@@ -146,8 +146,10 @@ function App() {
       }
     }));
 
-    // 过滤掉重复的
-    const pendingUploads = uploadResults.filter(r => r.status === 'pending' && r.id);
+    // 过滤掉重复的和失败的
+    const pendingUploads = uploadResults.filter(
+      (r): r is { base64: string; id: string; status: 'pending' } => r.status === 'pending' && !!r.id
+    );
     const duplicateCount = uploadResults.filter(r => r.status === 'duplicate').length;
     if (duplicateCount > 0) {
       console.log(`Skipped ${duplicateCount} duplicate receipts`);
