@@ -24,73 +24,72 @@ if (isProduction) {
     console.log(`[DB] Using local SQLite: ${dbPath}`);
 }
 
-// Initialize schema
+// Initialize schema — single batch call to minimize cold start latency
 export async function initDB() {
-    await db.executeMultiple(`
-        CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            email TEXT UNIQUE NOT NULL,
-            passwordHash TEXT NOT NULL,
-            createdAt TEXT NOT NULL
-        );
+    // One batch: create tables + index. All use IF NOT EXISTS so safe to re-run.
+    await db.batch([
+        {
+            sql: `CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL,
+                passwordHash TEXT NOT NULL,
+                createdAt TEXT NOT NULL
+            )`, args: []
+        },
+        {
+            sql: `CREATE TABLE IF NOT EXISTS receipts (
+                id TEXT PRIMARY KEY,
+                userId TEXT,
+                storeName TEXT,
+                date TEXT,
+                total REAL,
+                currency TEXT,
+                imageUrl TEXT,
+                status TEXT,
+                createdAt TEXT,
+                analysis TEXT,
+                imageHash TEXT,
+                FOREIGN KEY(userId) REFERENCES users(id)
+            )`, args: []
+        },
+        {
+            sql: `CREATE TABLE IF NOT EXISTS items (
+                id TEXT PRIMARY KEY,
+                receiptId TEXT,
+                name TEXT,
+                price REAL,
+                description TEXT,
+                nutrition TEXT,
+                details TEXT,
+                FOREIGN KEY(receiptId) REFERENCES receipts(id)
+            )`, args: []
+        },
+        {
+            sql: `CREATE TABLE IF NOT EXISTS reports (
+                userId TEXT NOT NULL,
+                period TEXT NOT NULL,
+                content TEXT,
+                updatedAt TEXT,
+                PRIMARY KEY(userId, period)
+            )`, args: []
+        },
+        {
+            sql: `CREATE INDEX IF NOT EXISTS idx_receipts_hash ON receipts(userId, imageHash)`,
+            args: []
+        }
+    ]);
 
-        CREATE TABLE IF NOT EXISTS receipts (
-            id TEXT PRIMARY KEY,
-            userId TEXT,
-            storeName TEXT,
-            date TEXT,
-            total REAL,
-            currency TEXT,
-            imageUrl TEXT,
-            status TEXT,
-            createdAt TEXT,
-            analysis TEXT,
-            imageHash TEXT,
-            FOREIGN KEY(userId) REFERENCES users(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS items (
-            id TEXT PRIMARY KEY,
-            receiptId TEXT,
-            name TEXT,
-            price REAL,
-            description TEXT,
-            nutrition TEXT,
-            details TEXT,
-            FOREIGN KEY(receiptId) REFERENCES receipts(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS reports (
-            userId TEXT NOT NULL,
-            period TEXT NOT NULL,
-            content TEXT,
-            updatedAt TEXT,
-            PRIMARY KEY(userId, period)
-        );
-    `);
-
-    // Migrations: add columns if missing
+    // Migrations: add columns if missing (one round trip to check, one batch to fix)
     try {
         const tableInfo = await db.execute("PRAGMA table_info(receipts)");
-        const columns = tableInfo.rows.map(r => r.name);
-        if (!columns.includes('userId')) {
-            await db.execute('ALTER TABLE receipts ADD COLUMN userId TEXT');
-        }
-        if (!columns.includes('analysis')) {
-            await db.execute('ALTER TABLE receipts ADD COLUMN analysis TEXT');
-        }
-        if (!columns.includes('imageHash')) {
-            await db.execute('ALTER TABLE receipts ADD COLUMN imageHash TEXT');
-        }
+        const columns = new Set(tableInfo.rows.map(r => r.name));
+        const migrations = [];
+        if (!columns.has('userId')) migrations.push({ sql: 'ALTER TABLE receipts ADD COLUMN userId TEXT', args: [] });
+        if (!columns.has('analysis')) migrations.push({ sql: 'ALTER TABLE receipts ADD COLUMN analysis TEXT', args: [] });
+        if (!columns.has('imageHash')) migrations.push({ sql: 'ALTER TABLE receipts ADD COLUMN imageHash TEXT', args: [] });
+        if (migrations.length > 0) await db.batch(migrations);
     } catch (e) {
         console.log('[DB] Migration check:', e.message);
-    }
-
-    // Index for image hash dedup
-    try {
-        await db.execute('CREATE INDEX IF NOT EXISTS idx_receipts_hash ON receipts(userId, imageHash)');
-    } catch (e) {
-        console.log('[DB] Index creation:', e.message);
     }
 
     console.log('[DB] Schema initialized');
