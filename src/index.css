@@ -1,0 +1,50 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --color-primary: #F97316;
+  --color-primary-light: #FFF7ED;
+  --color-secondary: #1E293B;
+  --color-surface: #ffffff;
+  --color-background: #FAFAF9;
+  --color-text-main: #1C1917;
+  --color-text-muted: #78716C;
+  --color-border: #F5F5F4;
+  --color-success: #22C55E;
+  --color-danger: #EF4444;
+  --font-display: "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+
+  --animate-scan: scan 2s linear infinite;
+
+  @keyframes scan {
+    0% { transform: translateY(-100%); opacity: 0; }
+    50% { opacity: 0.5; }
+    100% { transform: translateY(100%); opacity: 0; }
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-text-main);
+  font-family: var(--font-display);
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Safe area for mobile */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Smooth scrollbar */
+::-webkit-scrollbar { width: 0; height: 0; }
+
+/* Animation utility */
+.animate-fade-up {
+  animation: fadeUp 0.4s ease-out;
+}
