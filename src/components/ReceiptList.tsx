@@ -75,36 +75,55 @@ export function ReceiptList({ receipts, onReceiptClick, onReprocess }: ReceiptLi
         }
     };
 
-    const formatDate = (dateString: string) => {
+    // 按购物日期分组的 key（只取日期部分）
+    const getDateKey = (dateString: string) => {
+        if (!dateString) return '处理中';
+        try {
+            const d = new Date(dateString);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        } catch {
+            return '处理中';
+        }
+    };
+
+    // "今天/昨天/前天/1月15日 周三" 格式的日期标签
+    const formatDateLabel = (dateString: string) => {
+        if (!dateString) return '处理中';
         try {
             const d = new Date(dateString);
             const now = new Date();
-            const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+            // 只比较日期部分
+            const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const targetStart = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+            const diffDays = Math.round((todayStart.getTime() - targetStart.getTime()) / (1000 * 60 * 60 * 24));
 
             if (diffDays === 0) return '今天';
             if (diffDays === 1) return '昨天';
             if (diffDays === 2) return '前天';
 
-            return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+            return d.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' });
         } catch {
-            return dateString || '未知日期';
+            return dateString;
         }
     };
 
-    const formatTime = (dateString: string) => {
+    // 完整购物日期时间 "2月15日 15:20"
+    const formatFullDateTime = (dateString: string) => {
+        if (!dateString) return '处理中';
         try {
-            return new Date(dateString).toLocaleTimeString('zh-CN', {
-                hour: '2-digit',
-                minute: '2-digit'
-            });
+            const d = new Date(dateString);
+            const month = d.getMonth() + 1;
+            const day = d.getDate();
+            const time = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+            return `${month}月${day}日 ${time}`;
         } catch {
-            return '';
+            return dateString;
         }
     };
 
-    // 按日期分组
+    // 按购物日期分组
     const grouped = receipts.reduce<Record<string, Receipt[]>>((acc, r) => {
-        const key = r.date ? new Date(r.date).toLocaleDateString('zh-CN') : '处理中';
+        const key = getDateKey(r.date);
         if (!acc[key]) acc[key] = [];
         acc[key].push(r);
         return acc;
@@ -140,8 +159,8 @@ export function ReceiptList({ receipts, onReceiptClick, onReprocess }: ReceiptLi
                 {Object.entries(grouped).map(([dateKey, dayReceipts]) => (
                     <div key={dateKey}>
                         <div className="flex items-center justify-between mb-3 px-1">
-                            <span className="text-xs font-bold text-text-muted uppercase tracking-wider">
-                                {formatDate(dayReceipts[0].date)}
+                            <span className="text-xs font-bold text-text-muted tracking-wider">
+                                {formatDateLabel(dayReceipts[0].date)}
                             </span>
                             <span className="text-xs text-text-muted">
                                 {dayReceipts.filter(r => r.status === 'completed').reduce((s, r) => s + r.total, 0).toFixed(0)} {dayReceipts[0]?.currency || '¥'}
@@ -238,7 +257,7 @@ export function ReceiptList({ receipts, onReceiptClick, onReprocess }: ReceiptLi
                                                     {receipt.storeName || '未知商家'}
                                                 </div>
                                                 <div className="text-xs text-text-muted mt-0.5">
-                                                    {receipt.date ? formatTime(receipt.date) : ''} · {receipt.items.length} 件商品
+                                                    {receipt.date ? formatFullDateTime(receipt.date) : '处理中'} · {receipt.items.length} 件商品
                                                     {(receipt.status === 'processing' || receipt.status === 'pending' || isReprocessing) && (
                                                         <span className="ml-1 text-primary">
                                                             {isReprocessing ? '重新识别中...' : '分析中...'}

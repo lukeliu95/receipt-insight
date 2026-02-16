@@ -13,13 +13,6 @@ import { LoginPage } from './components/auth/LoginPage';
 import { api } from './services/api';
 import { clsx } from 'clsx';
 import type { Receipt } from './types';
-
-// Compute SHA-256 hash of a string (for image dedup)
-async function computeHash(data: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const buffer = await crypto.subtle.digest('SHA-256', encoder.encode(data));
-  return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
 import { AnimatePresence } from 'framer-motion';
 
 function App() {
@@ -71,29 +64,30 @@ function App() {
     setScanImage(base64);
 
     try {
-      // 1. 计算图片 hash
-      const imageHash = await computeHash(base64);
-
-      // 2. 上传到服务端（带去重检查）
-      const uploadResult = await api.uploadReceipt(base64, imageHash);
-
-      if (uploadResult.status === 'duplicate') {
-        setScanning(false);
-        setScanImage(null);
-        alert('这张小票已经上传过了');
-        return;
-      }
-
+      // 1. 上传图片到服务端
+      const uploadResult = await api.uploadReceipt(base64);
       const receiptId = uploadResult.id!;
 
-      // 3. 在本地状态中显示临时 receipt
+      // 2. 在本地状态中显示临时 receipt
       addReceipt({
         id: receiptId, imageUrl: base64, storeName: '正在分析...', date: '',
         createdAt: new Date().toISOString(), currency: '¥', total: 0, items: [], status: 'processing'
       });
 
-      // 4. 调服务端处理（OCR + 分析）
+      // 3. 调服务端处理（OCR + 分析）
       const processResult = await api.processReceipt(receiptId);
+
+      // 4. 检查是否重复（基于小票日期）
+      if (processResult.isDuplicate) {
+        // 从本地状态移除临时 receipt
+        const { removeReceipt } = useReceiptStore.getState();
+        removeReceipt(receiptId);
+        setScanning(false);
+        setScanImage(null);
+        alert(`这张小票已经录入过了（${processResult.duplicateStore || ''}）`);
+        return;
+      }
+
       const r = processResult.receipt;
 
       // 5. 更新本地状态
@@ -136,9 +130,8 @@ function App() {
 
     // Phase 1: 并行上传所有图片
     const uploadResults = await Promise.all(images.map(async (base64) => {
-      const imageHash = await computeHash(base64);
       try {
-        const result = await api.uploadReceipt(base64, imageHash);
+        const result = await api.uploadReceipt(base64);
         return { base64, ...result };
       } catch (error) {
         console.error('Upload failed:', error);
@@ -146,14 +139,9 @@ function App() {
       }
     }));
 
-    // 过滤掉重复的和失败的
     const pendingUploads = uploadResults.filter(
       (r): r is { base64: string; id: string; status: 'pending' } => r.status === 'pending' && !!r.id
     );
-    const duplicateCount = uploadResults.filter(r => r.status === 'duplicate').length;
-    if (duplicateCount > 0) {
-      console.log(`Skipped ${duplicateCount} duplicate receipts`);
-    }
 
     setBatchTotal(pendingUploads.length);
 
@@ -169,16 +157,22 @@ function App() {
 
       try {
         const processResult = await api.processReceipt(receiptId);
-        const r = processResult.receipt;
-        updateReceiptData(receiptId, {
-          storeName: r.storeName,
-          date: r.date,
-          total: r.total,
-          currency: r.currency,
-          items: r.items || [],
-          status: 'completed',
-          analysis: r.analysis
-        });
+        if (processResult.isDuplicate) {
+          // 重复小票，移除临时记录
+          const { removeReceipt } = useReceiptStore.getState();
+          removeReceipt(receiptId);
+        } else {
+          const r = processResult.receipt;
+          updateReceiptData(receiptId, {
+            storeName: r.storeName,
+            date: r.date,
+            total: r.total,
+            currency: r.currency,
+            items: r.items || [],
+            status: 'completed',
+            analysis: r.analysis
+          });
+        }
       } catch (error) {
         console.error(error);
         updateReceiptData(receiptId, { storeName: '识别失败', status: 'error' });

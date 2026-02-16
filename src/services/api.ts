@@ -97,12 +97,12 @@ export const api = {
         return handleResponse(res);
     },
 
-    // Upload receipt image (with hash dedup)
-    async uploadReceipt(imageData: string, imageHash: string): Promise<{ id?: string; status: 'pending' | 'duplicate'; existingId?: string }> {
+    // Upload receipt image
+    async uploadReceipt(imageData: string): Promise<{ id: string; status: 'pending' }> {
         const res = await fetch(`${API_BASE}/receipts/upload`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-            body: JSON.stringify({ imageData, imageHash })
+            body: JSON.stringify({ imageData })
         });
         return handleResponse(res);
     },
@@ -118,7 +118,7 @@ export const api = {
     },
 
     // Process receipt (server-side Gemini OCR + analysis)
-    async processReceipt(id: string): Promise<{ receipt: Receipt; isDuplicate: boolean; originalId: string | null }> {
+    async processReceipt(id: string): Promise<{ receipt: Receipt; isDuplicate: boolean; duplicateStore?: string; duplicateDate?: string }> {
         const res = await fetch(`${API_BASE}/receipts/${id}/process`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },

@@ -198,24 +198,14 @@ app.get('/api/receipts/:id/image', authMiddleware, async (req, res) => {
     }
 });
 
-// Upload Receipt (with image hash dedup)
+// Upload Receipt image
 app.post('/api/receipts/upload', authMiddleware, async (req, res) => {
     try {
-        const { imageData, imageHash } = req.body;
-        if (!imageData || !imageHash) {
-            return res.status(400).json({ error: 'imageData and imageHash are required' });
+        const { imageData } = req.body;
+        if (!imageData) {
+            return res.status(400).json({ error: 'imageData is required' });
         }
 
-        // Layer 1: image hash dedup
-        const existing = await db.execute({
-            sql: 'SELECT id, status FROM receipts WHERE userId = ? AND imageHash = ?',
-            args: [req.userId, imageHash]
-        });
-        if (existing.rows.length > 0) {
-            return res.json({ status: 'duplicate', existingId: existing.rows[0].id });
-        }
-
-        // Save image and create pending receipt
         const id = generateId();
         const createdAt = new Date().toISOString();
 
@@ -231,9 +221,9 @@ app.post('/api/receipts/upload', authMiddleware, async (req, res) => {
         }
 
         await db.execute({
-            sql: `INSERT INTO receipts (id, userId, storeName, date, total, currency, imageUrl, status, createdAt, imageHash)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            args: [id, req.userId, '正在分析...', null, 0, '¥', savedImageUrl, 'pending', createdAt, imageHash]
+            sql: `INSERT INTO receipts (id, userId, storeName, date, total, currency, imageUrl, status, createdAt)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [id, req.userId, '正在分析...', null, 0, '¥', savedImageUrl, 'pending', createdAt]
         });
 
         res.json({ id, status: 'pending' });
@@ -274,23 +264,27 @@ app.post('/api/receipts/:id/process', authMiddleware, async (req, res) => {
         // OCR with Gemini
         const ocrResult = await processReceiptImage(imageData);
 
-        // Layer 2: data fingerprint dedup (storeName|date|total)
-        const fingerprint = `${ocrResult.storeName}|${ocrResult.date}|${ocrResult.total}`;
-        const dupCheck = await db.execute({
-            sql: `SELECT id FROM receipts WHERE userId = ? AND id != ? AND storeName = ? AND date = ? AND total = ?`,
-            args: [req.userId, id, ocrResult.storeName, ocrResult.date, ocrResult.total]
-        });
-
+        // Dedup: check if a receipt with the same date already exists
         let finalId = id;
         let isDuplicate = false;
 
-        if (dupCheck.rows.length > 0) {
-            // Data fingerprint duplicate - update existing instead of creating new
-            finalId = dupCheck.rows[0].id;
-            isDuplicate = true;
-            // Delete the pending receipt we just uploaded
-            await db.execute({ sql: 'DELETE FROM items WHERE receiptId = ?', args: [id] });
-            await db.execute({ sql: 'DELETE FROM receipts WHERE id = ?', args: [id] });
+        if (ocrResult.date) {
+            const dupCheck = await db.execute({
+                sql: `SELECT id, storeName FROM receipts WHERE userId = ? AND id != ? AND date = ? AND status = 'completed'`,
+                args: [req.userId, id, ocrResult.date]
+            });
+            if (dupCheck.rows.length > 0) {
+                isDuplicate = true;
+                // Clean up the pending receipt
+                await db.execute({ sql: 'DELETE FROM items WHERE receiptId = ?', args: [id] });
+                await db.execute({ sql: 'DELETE FROM receipts WHERE id = ?', args: [id] });
+                return res.json({
+                    receipt: null,
+                    isDuplicate: true,
+                    duplicateStore: dupCheck.rows[0].storeName,
+                    duplicateDate: ocrResult.date
+                });
+            }
         }
 
         // Generate analysis
