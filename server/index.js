@@ -223,6 +223,63 @@ app.delete('/api/receipts/:id', authMiddleware, (req, res) => {
     res.json({ success: true });
 });
 
+// ==================== REPORT ROUTES (Protected) ====================
+
+const getReportsDir = (userId) => {
+    const baseDir = isVercel ? '/tmp' : path.join(__dirname, '../data');
+    return path.join(baseDir, 'reports', userId);
+};
+
+// GET /api/reports/:period - 读取已保存的报告
+app.get('/api/reports/:period', authMiddleware, async (req, res) => {
+    const { period } = req.params;
+    if (!['week', 'month', 'all'].includes(period)) {
+        return res.status(400).json({ error: 'Invalid period' });
+    }
+
+    const dir = getReportsDir(req.userId);
+    const filePath = path.join(dir, `report-${period}.md`);
+
+    try {
+        const exists = await fs.pathExists(filePath);
+        if (!exists) {
+            return res.json({ content: null, updatedAt: null });
+        }
+        const content = await fs.readFile(filePath, 'utf-8');
+        const stat = await fs.stat(filePath);
+        res.json({ content, updatedAt: stat.mtime.toISOString() });
+    } catch (error) {
+        console.error('Read report error:', error);
+        res.json({ content: null, updatedAt: null });
+    }
+});
+
+// POST /api/reports/:period - 保存报告为 md 文件
+app.post('/api/reports/:period', authMiddleware, async (req, res) => {
+    const { period } = req.params;
+    if (!['week', 'month', 'all'].includes(period)) {
+        return res.status(400).json({ error: 'Invalid period' });
+    }
+
+    const { content } = req.body;
+    if (!content) {
+        return res.status(400).json({ error: 'Content is required' });
+    }
+
+    const dir = getReportsDir(req.userId);
+    await fs.ensureDir(dir);
+    const filePath = path.join(dir, `report-${period}.md`);
+
+    try {
+        await fs.writeFile(filePath, content, 'utf-8');
+        const stat = await fs.stat(filePath);
+        res.json({ success: true, updatedAt: stat.mtime.toISOString() });
+    } catch (error) {
+        console.error('Save report error:', error);
+        res.status(500).json({ error: 'Failed to save report' });
+    }
+});
+
 // Export the app for Vercel Serverless Functions
 export default app;
 

@@ -93,3 +93,22 @@ export const api = {
         return handleResponse(res);
     }
 };
+
+// Report API
+export const reportApi = {
+    async getReport(period: string): Promise<{ content: string | null; updatedAt: string | null }> {
+        const res = await fetch(`${API_BASE}/reports/${period}`, {
+            headers: { ...getAuthHeaders() },
+        });
+        return handleResponse(res);
+    },
+
+    async saveReport(period: string, content: string): Promise<{ success: boolean; updatedAt: string }> {
+        const res = await fetch(`${API_BASE}/reports/${period}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ content }),
+        });
+        return handleResponse(res);
+    },
+};
