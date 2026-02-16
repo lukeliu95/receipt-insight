@@ -45,6 +45,7 @@ export async function initDB() {
             status TEXT,
             createdAt TEXT,
             analysis TEXT,
+            imageHash TEXT,
             FOREIGN KEY(userId) REFERENCES users(id)
         );
 
@@ -78,8 +79,18 @@ export async function initDB() {
         if (!columns.includes('analysis')) {
             await db.execute('ALTER TABLE receipts ADD COLUMN analysis TEXT');
         }
+        if (!columns.includes('imageHash')) {
+            await db.execute('ALTER TABLE receipts ADD COLUMN imageHash TEXT');
+        }
     } catch (e) {
         console.log('[DB] Migration check:', e.message);
+    }
+
+    // Index for image hash dedup
+    try {
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_receipts_hash ON receipts(userId, imageHash)');
+    } catch (e) {
+        console.log('[DB] Index creation:', e.message);
     }
 
     console.log('[DB] Schema initialized');

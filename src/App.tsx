@@ -10,13 +10,20 @@ import { ReceiptDetail } from './components/ReceiptDetail';
 import { WeeklyReportView } from './components/WeeklyReportView';
 import { ReceiptAnalysis } from './components/ReceiptAnalysis';
 import { LoginPage } from './components/auth/LoginPage';
-import { processReceiptImage, generateReceiptAnalysis } from './services/gemini';
+import { api } from './services/api';
 import { clsx } from 'clsx';
 import type { Receipt } from './types';
+
+// Compute SHA-256 hash of a string (for image dedup)
+async function computeHash(data: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const buffer = await crypto.subtle.digest('SHA-256', encoder.encode(data));
+  return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 import { AnimatePresence } from 'framer-motion';
 
 function App() {
-  const { receipts, isScanning, setScanning, addReceipt, updateReceiptData, updateReceiptStatus, loadReceipts, clearReceipts, getRecentReceipts } = useReceiptStore();
+  const { receipts, isScanning, setScanning, addReceipt, updateReceiptData, loadReceipts, clearReceipts } = useReceiptStore();
   const { user, isLoading: authLoading, logout } = useAuthStore();
 
   const [activeTab, setActiveTab] = useState<'home' | 'report'>('home');
@@ -58,82 +65,121 @@ function App() {
     });
   };
 
-  // 处理单张小票（带扫描动画 + 分析弹窗）
+  // 处理单张小票（上传→服务端OCR+分析→显示结果）
   const processSingle = async (base64: string) => {
     setScanning(true);
     setScanImage(base64);
 
-    const tempId = Date.now().toString();
-    addReceipt({
-      id: tempId, imageUrl: base64, storeName: '正在分析...', date: new Date().toISOString(),
-      createdAt: new Date().toISOString(), currency: '¥', total: 0, items: [], status: 'processing'
-    });
-
     try {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      const result = await processReceiptImage(base64);
-      if (result) {
-        updateReceiptData(tempId, result);
-        updateReceiptStatus(tempId, 'completed');
+      // 1. 计算图片 hash
+      const imageHash = await computeHash(base64);
 
-        const fullReceipt: Receipt = {
-          id: tempId, imageUrl: base64,
-          storeName: result.storeName || '未知商家', date: result.date || new Date().toISOString(),
-          currency: result.currency || '¥', total: result.total || 0,
-          items: result.items || [], status: 'completed'
-        };
+      // 2. 上传到服务端（带去重检查）
+      const uploadResult = await api.uploadReceipt(base64, imageHash);
 
+      if (uploadResult.status === 'duplicate') {
         setScanning(false);
         setScanImage(null);
-
-        setAnalysisReceipt(fullReceipt);
-        setIsAnalyzing(true);
-        try {
-          const recentReceipts = getRecentReceipts(3);
-          const analysis = await generateReceiptAnalysis(fullReceipt, recentReceipts);
-          setAnalysisText(analysis);
-          updateReceiptData(tempId, { analysis });
-        } catch (err) {
-          console.error('Analysis failed:', err);
-          setAnalysisText('分析生成失败，请稍后查看详情重新生成。');
-        } finally {
-          setIsAnalyzing(false);
-        }
+        alert('这张小票已经上传过了');
+        return;
       }
+
+      const receiptId = uploadResult.id!;
+
+      // 3. 在本地状态中显示临时 receipt
+      addReceipt({
+        id: receiptId, imageUrl: base64, storeName: '正在分析...', date: '',
+        createdAt: new Date().toISOString(), currency: '¥', total: 0, items: [], status: 'processing'
+      });
+
+      // 4. 调服务端处理（OCR + 分析）
+      const processResult = await api.processReceipt(receiptId);
+      const r = processResult.receipt;
+
+      // 5. 更新本地状态
+      updateReceiptData(receiptId, {
+        storeName: r.storeName,
+        date: r.date,
+        total: r.total,
+        currency: r.currency,
+        items: r.items || [],
+        status: 'completed',
+        analysis: r.analysis
+      });
+
+      setScanning(false);
+      setScanImage(null);
+
+      // 6. 显示分析弹窗
+      const fullReceipt: Receipt = {
+        id: receiptId, imageUrl: base64,
+        storeName: r.storeName || '未知商家', date: r.date || '',
+        currency: r.currency || '¥', total: r.total || 0,
+        items: r.items || [], status: 'completed'
+      };
+      setAnalysisReceipt(fullReceipt);
+      setAnalysisText(r.analysis || '');
+      setIsAnalyzing(false);
+
     } catch (error) {
       console.error(error);
-      updateReceiptStatus(tempId, 'error');
-      updateReceiptData(tempId, { storeName: '识别失败' });
       setScanning(false);
       setScanImage(null);
     }
   };
 
-  // 批量处理多张小票（后台逐张处理，显示进度条）
+  // 批量处理多张小票（上传→逐张服务端处理→显示进度）
   const processBatch = async (files: File[]) => {
     const images = await Promise.all(files.map(readFileAsBase64));
     setBatchTotal(images.length);
     setBatchDone(0);
 
-    for (let i = 0; i < images.length; i++) {
-      const base64 = images[i];
-      const tempId = Date.now().toString() + Math.random().toString(36).slice(2);
+    // Phase 1: 并行上传所有图片
+    const uploadResults = await Promise.all(images.map(async (base64) => {
+      const imageHash = await computeHash(base64);
+      try {
+        const result = await api.uploadReceipt(base64, imageHash);
+        return { base64, ...result };
+      } catch (error) {
+        console.error('Upload failed:', error);
+        return { base64, status: 'error' as const };
+      }
+    }));
+
+    // 过滤掉重复的
+    const pendingUploads = uploadResults.filter(r => r.status === 'pending' && r.id);
+    const duplicateCount = uploadResults.filter(r => r.status === 'duplicate').length;
+    if (duplicateCount > 0) {
+      console.log(`Skipped ${duplicateCount} duplicate receipts`);
+    }
+
+    setBatchTotal(pendingUploads.length);
+
+    // Phase 2: 逐个处理
+    for (let i = 0; i < pendingUploads.length; i++) {
+      const upload = pendingUploads[i];
+      const receiptId = upload.id!;
 
       addReceipt({
-        id: tempId, imageUrl: base64, storeName: '正在分析...', date: new Date().toISOString(),
+        id: receiptId, imageUrl: upload.base64, storeName: '正在分析...', date: '',
         createdAt: new Date().toISOString(), currency: '¥', total: 0, items: [], status: 'processing'
       });
 
       try {
-        const result = await processReceiptImage(base64);
-        if (result) {
-          updateReceiptData(tempId, result);
-          updateReceiptStatus(tempId, 'completed');
-        }
+        const processResult = await api.processReceipt(receiptId);
+        const r = processResult.receipt;
+        updateReceiptData(receiptId, {
+          storeName: r.storeName,
+          date: r.date,
+          total: r.total,
+          currency: r.currency,
+          items: r.items || [],
+          status: 'completed',
+          analysis: r.analysis
+        });
       } catch (error) {
         console.error(error);
-        updateReceiptStatus(tempId, 'error');
-        updateReceiptData(tempId, { storeName: '识别失败' });
+        updateReceiptData(receiptId, { storeName: '识别失败', status: 'error' });
       }
 
       setBatchDone(i + 1);
@@ -141,6 +187,27 @@ function App() {
 
     // 清除进度
     setTimeout(() => { setBatchTotal(0); setBatchDone(0); }, 2000);
+  };
+
+  // 重新识别小票（服务端重新 OCR + 分析）
+  const handleReprocess = async (receipt: Receipt) => {
+    updateReceiptData(receipt.id, { storeName: '重新识别中...', status: 'processing' });
+    try {
+      const processResult = await api.processReceipt(receipt.id);
+      const r = processResult.receipt;
+      updateReceiptData(receipt.id, {
+        storeName: r.storeName,
+        date: r.date,
+        total: r.total,
+        currency: r.currency,
+        items: r.items || [],
+        status: 'completed',
+        analysis: r.analysis
+      });
+    } catch (error) {
+      console.error('Reprocess failed:', error);
+      updateReceiptData(receipt.id, { storeName: '识别失败', status: 'error' });
+    }
   };
 
   // 拍照（单张，调用摄像头）
@@ -210,6 +277,7 @@ function App() {
             <ReceiptList
               receipts={receipts}
               onReceiptClick={setSelectedReceipt}
+              onReprocess={handleReprocess}
             />
           )
         )}

@@ -22,6 +22,6 @@ export interface Receipt {
     currency: string;
     total: number;
     items: LineItem[];
-    status: 'scanning' | 'processing' | 'completed' | 'error';
+    status: 'pending' | 'scanning' | 'processing' | 'completed' | 'error';
     analysis?: string; // AI 营养与消费分析 (含近3天对比)
 }

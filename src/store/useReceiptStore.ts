@@ -11,6 +11,7 @@ interface ReceiptStore {
     updateReceiptData: (id: string, data: Partial<Receipt>) => Promise<void>;
     updateReceiptStatus: (id: string, status: Receipt['status']) => Promise<void>;
     removeReceipt: (id: string) => Promise<void>;
+    removeReceipts: (ids: string[]) => Promise<void>;
     clearReceipts: () => void;
     getRecentReceipts: (days: number) => Receipt[];
 }
@@ -65,6 +66,11 @@ export const useReceiptStore = create<ReceiptStore>((set, get) => ({
     removeReceipt: async (id) => {
         set((state) => ({ receipts: state.receipts.filter(r => r.id !== id) }));
         await api.deleteReceipt(id);
+    },
+
+    removeReceipts: async (ids) => {
+        set((state) => ({ receipts: state.receipts.filter(r => !ids.includes(r.id)) }));
+        await api.batchDeleteReceipts(ids);
     },
 
     clearReceipts: () => set({ receipts: [] }),

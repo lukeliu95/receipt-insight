@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { Receipt } from '../types';
 import { ArrowLeft, Leaf, Trash2, X, Maximize2 } from 'lucide-react';
 import { useReceiptStore } from '../store/useReceiptStore';
-import { generateReceiptAnalysis } from '../services/gemini';
+import { api } from '../services/api';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -13,7 +13,7 @@ interface ReceiptDetailProps {
 }
 
 export function ReceiptDetail({ receipt, onClose }: ReceiptDetailProps) {
-    const { removeReceipt, getRecentReceipts } = useReceiptStore();
+    const { removeReceipt, updateReceiptData } = useReceiptStore();
     const [isImageZoomed, setIsImageZoomed] = useState(false);
     const [analysis, setAnalysis] = useState(receipt.analysis || '');
     const [loadingAnalysis, setLoadingAnalysis] = useState(false);
@@ -28,11 +28,21 @@ export function ReceiptDetail({ receipt, onClose }: ReceiptDetailProps) {
     const handleReAnalyze = async () => {
         setLoadingAnalysis(true);
         try {
-            const recent = getRecentReceipts(3);
-            const result = await generateReceiptAnalysis(receipt, recent);
-            setAnalysis(result);
+            const result = await api.processReceipt(receipt.id);
+            const newAnalysis = result.receipt.analysis || '';
+            setAnalysis(newAnalysis);
+            updateReceiptData(receipt.id, {
+                storeName: result.receipt.storeName,
+                date: result.receipt.date,
+                total: result.receipt.total,
+                currency: result.receipt.currency,
+                items: result.receipt.items || [],
+                analysis: newAnalysis,
+                status: 'completed'
+            });
         } catch (e) {
             console.error(e);
+            setAnalysis('重新分析失败，请稍后再试。');
         } finally {
             setLoadingAnalysis(false);
         }

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import db, { initDB } from './db.js';
 import dayjs from 'dayjs';
 import { hashPassword, comparePassword, generateToken, authMiddleware, generateId } from './auth.js';
+import { processReceiptImage, generateReceiptAnalysis } from './gemini.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -179,6 +180,181 @@ app.get('/api/receipts', authMiddleware, async (req, res) => {
     }
 });
 
+// Upload Receipt (with image hash dedup)
+app.post('/api/receipts/upload', authMiddleware, async (req, res) => {
+    try {
+        const { imageData, imageHash } = req.body;
+        if (!imageData || !imageHash) {
+            return res.status(400).json({ error: 'imageData and imageHash are required' });
+        }
+
+        // Layer 1: image hash dedup
+        const existing = await db.execute({
+            sql: 'SELECT id, status FROM receipts WHERE userId = ? AND imageHash = ?',
+            args: [req.userId, imageHash]
+        });
+        if (existing.rows.length > 0) {
+            return res.json({ status: 'duplicate', existingId: existing.rows[0].id });
+        }
+
+        // Save image and create pending receipt
+        const id = generateId();
+        const createdAt = new Date().toISOString();
+
+        let savedImageUrl = '';
+        if (imageData.startsWith('data:')) {
+            if (isProduction) {
+                savedImageUrl = imageData;
+            } else {
+                savedImageUrl = await saveImageToDisk(imageData, createdAt);
+            }
+        } else {
+            savedImageUrl = imageData;
+        }
+
+        await db.execute({
+            sql: `INSERT INTO receipts (id, userId, storeName, date, total, currency, imageUrl, status, createdAt, imageHash)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [id, req.userId, '正在分析...', null, 0, '¥', savedImageUrl, 'pending', createdAt, imageHash]
+        });
+
+        res.json({ id, status: 'pending' });
+    } catch (error) {
+        console.error('Upload error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Process Receipt (server-side Gemini OCR + analysis)
+app.post('/api/receipts/:id/process', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Fetch the receipt
+        const receiptResult = await db.execute({
+            sql: 'SELECT * FROM receipts WHERE id = ? AND userId = ?',
+            args: [id, req.userId]
+        });
+        const receipt = receiptResult.rows[0];
+        if (!receipt) {
+            return res.status(404).json({ error: 'Receipt not found' });
+        }
+
+        // Get image data for OCR
+        let imageData = receipt.imageUrl;
+        if (!imageData) {
+            return res.status(400).json({ error: 'No image data for this receipt' });
+        }
+
+        // For local dev, read file from disk and convert to base64
+        if (imageData.startsWith('/uploads/')) {
+            const filePath = path.join(__dirname, '..', imageData);
+            const fileBuffer = await fs.readFile(filePath);
+            imageData = `data:image/webp;base64,${fileBuffer.toString('base64')}`;
+        }
+
+        // OCR with Gemini
+        const ocrResult = await processReceiptImage(imageData);
+
+        // Layer 2: data fingerprint dedup (storeName|date|total)
+        const fingerprint = `${ocrResult.storeName}|${ocrResult.date}|${ocrResult.total}`;
+        const dupCheck = await db.execute({
+            sql: `SELECT id FROM receipts WHERE userId = ? AND id != ? AND storeName = ? AND date = ? AND total = ?`,
+            args: [req.userId, id, ocrResult.storeName, ocrResult.date, ocrResult.total]
+        });
+
+        let finalId = id;
+        let isDuplicate = false;
+
+        if (dupCheck.rows.length > 0) {
+            // Data fingerprint duplicate - update existing instead of creating new
+            finalId = dupCheck.rows[0].id;
+            isDuplicate = true;
+            // Delete the pending receipt we just uploaded
+            await db.execute({ sql: 'DELETE FROM items WHERE receiptId = ?', args: [id] });
+            await db.execute({ sql: 'DELETE FROM receipts WHERE id = ?', args: [id] });
+        }
+
+        // Generate analysis
+        const recentResult = await db.execute({
+            sql: `SELECT r.*, GROUP_CONCAT(i.id || '|||' || i.name || '|||' || i.price || '|||' || COALESCE(i.nutrition,'') || '|||' || COALESCE(i.details,''), '###') as itemsConcat
+                  FROM receipts r LEFT JOIN items i ON r.id = i.receiptId
+                  WHERE r.userId = ? AND r.status = 'completed' AND r.id != ? AND r.date >= datetime('now', '-3 days')
+                  GROUP BY r.id ORDER BY r.date DESC LIMIT 10`,
+            args: [req.userId, finalId]
+        });
+
+        const recentReceipts = recentResult.rows.map(r => ({
+            storeName: r.storeName,
+            date: r.date,
+            total: r.total,
+            currency: r.currency,
+            items: r.itemsConcat ? r.itemsConcat.split('###').map(s => {
+                const [iid, name, price, nutrition, details] = s.split('|||');
+                return { id: iid, name, price: parseFloat(price), nutrition, details };
+            }) : []
+        }));
+
+        const fullReceipt = {
+            storeName: ocrResult.storeName,
+            date: ocrResult.date,
+            total: ocrResult.total,
+            currency: ocrResult.currency,
+            items: ocrResult.items
+        };
+
+        let analysis = '';
+        try {
+            analysis = await generateReceiptAnalysis(fullReceipt, recentReceipts);
+        } catch (err) {
+            console.error('[Gemini] Analysis failed:', err);
+            analysis = '分析生成失败';
+        }
+
+        // Update the receipt with OCR results
+        await db.execute({
+            sql: `UPDATE receipts SET storeName = ?, date = ?, total = ?, currency = ?, status = 'completed', analysis = ?
+                  WHERE id = ?`,
+            args: [ocrResult.storeName, ocrResult.date, ocrResult.total, ocrResult.currency, analysis, finalId]
+        });
+
+        // Save items
+        await db.execute({ sql: 'DELETE FROM items WHERE receiptId = ?', args: [finalId] });
+        for (const item of ocrResult.items) {
+            await db.execute({
+                sql: 'INSERT INTO items (id, receiptId, name, price, description, nutrition, details) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                args: [item.id, finalId, item.name, item.price, item.description, item.nutrition, item.details]
+            });
+        }
+
+        // Fetch the complete updated receipt
+        const updatedResult = await db.execute({ sql: 'SELECT * FROM receipts WHERE id = ?', args: [finalId] });
+        const itemsResult = await db.execute({ sql: 'SELECT * FROM items WHERE receiptId = ?', args: [finalId] });
+
+        const finalReceipt = {
+            ...updatedResult.rows[0],
+            items: itemsResult.rows,
+            analysis
+        };
+
+        res.json({
+            receipt: finalReceipt,
+            isDuplicate,
+            originalId: isDuplicate ? id : null
+        });
+    } catch (error) {
+        console.error('Process error:', error);
+        // Mark as error
+        try {
+            await db.execute({
+                sql: `UPDATE receipts SET status = 'error', storeName = '识别失败' WHERE id = ?`,
+                args: [req.params.id]
+            });
+        } catch (e) { /* ignore */ }
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Save Receipt
 app.post('/api/receipts', authMiddleware, async (req, res) => {
     try {
@@ -243,6 +419,35 @@ app.delete('/api/receipts/:id', authMiddleware, async (req, res) => {
     await db.execute({ sql: 'DELETE FROM items WHERE receiptId = ?', args: [id] });
     await db.execute({ sql: 'DELETE FROM receipts WHERE id = ?', args: [id] });
     res.json({ success: true });
+});
+
+// Batch Delete Receipts
+app.post('/api/receipts/batch-delete', authMiddleware, async (req, res) => {
+    try {
+        const { ids } = req.body;
+        if (!Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ error: 'ids array is required' });
+        }
+
+        // Verify ownership for all
+        const placeholders = ids.map(() => '?').join(',');
+        const check = await db.execute({
+            sql: `SELECT id FROM receipts WHERE id IN (${placeholders}) AND userId = ?`,
+            args: [...ids, req.userId]
+        });
+        const ownedIds = check.rows.map(r => r.id);
+
+        if (ownedIds.length > 0) {
+            const ph = ownedIds.map(() => '?').join(',');
+            await db.execute({ sql: `DELETE FROM items WHERE receiptId IN (${ph})`, args: ownedIds });
+            await db.execute({ sql: `DELETE FROM receipts WHERE id IN (${ph})`, args: ownedIds });
+        }
+
+        res.json({ success: true, deleted: ownedIds.length });
+    } catch (error) {
+        console.error('Batch delete error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // ==================== REPORT ROUTES (Protected) ====================

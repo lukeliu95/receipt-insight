@@ -91,6 +91,35 @@ export const api = {
             headers: { ...getAuthHeaders() },
         });
         return handleResponse(res);
+    },
+
+    // Upload receipt image (with hash dedup)
+    async uploadReceipt(imageData: string, imageHash: string): Promise<{ id?: string; status: 'pending' | 'duplicate'; existingId?: string }> {
+        const res = await fetch(`${API_BASE}/receipts/upload`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ imageData, imageHash })
+        });
+        return handleResponse(res);
+    },
+
+    // Batch delete receipts
+    async batchDeleteReceipts(ids: string[]): Promise<{ success: boolean; deleted: number }> {
+        const res = await fetch(`${API_BASE}/receipts/batch-delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ ids })
+        });
+        return handleResponse(res);
+    },
+
+    // Process receipt (server-side Gemini OCR + analysis)
+    async processReceipt(id: string): Promise<{ receipt: Receipt; isDuplicate: boolean; originalId: string | null }> {
+        const res = await fetch(`${API_BASE}/receipts/${id}/process`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        });
+        return handleResponse(res);
     }
 };
 
