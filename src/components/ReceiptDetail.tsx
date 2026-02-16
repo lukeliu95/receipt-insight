@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import type { Receipt } from '../types';
 import { ArrowLeft, Leaf, Trash2, X, Maximize2, ImageIcon } from 'lucide-react';
 import { useReceiptStore } from '../store/useReceiptStore';
@@ -21,12 +21,10 @@ export function ReceiptDetail({ receipt, onClose }: ReceiptDetailProps) {
     // Lazy load image
     const [imageUrl, setImageUrl] = useState<string | null>(null);
     const [imageLoading, setImageLoading] = useState(false);
-    const [imageRequested, setImageRequested] = useState(false);
 
     const loadImage = async () => {
         if (imageUrl || imageLoading) return;
         setImageLoading(true);
-        setImageRequested(true);
         try {
             const url = await api.getReceiptImage(receipt.id);
             setImageUrl(url);
