@@ -255,6 +255,7 @@ function App() {
       <header className="fixed top-0 w-full z-40 bg-white/90 backdrop-blur-md border-b border-stone-100 px-5 py-3 flex justify-between items-center">
         <h1 className="text-lg font-black tracking-tight">
           <span className="text-primary">花</span>在哪里了
+          <span className="text-[10px] text-stone-400 font-normal ml-1">v1.0</span>
         </h1>
         <button
           onClick={() => { logout(); clearReceipts(); }}
