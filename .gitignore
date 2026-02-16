@@ -37,6 +37,7 @@ dist-ssr
 data/*.db
 data/*.sqlite
 *.sqlite3
+data/reports
 
 # User Uploads
 uploads/*

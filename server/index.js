@@ -178,17 +178,31 @@ app.post('/api/receipts', authMiddleware, async (req, res) => {
             savedImageUrl = imageUrl;
         }
 
-        const insertReceipt = db.prepare(`
-            INSERT OR REPLACE INTO receipts (id, userId, storeName, date, total, currency, imageUrl, status, createdAt, analysis)
+        const upsertReceipt = db.prepare(`
+            INSERT INTO receipts (id, userId, storeName, date, total, currency, imageUrl, status, createdAt, analysis)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                storeName = excluded.storeName,
+                date = excluded.date,
+                total = excluded.total,
+                currency = excluded.currency,
+                imageUrl = excluded.imageUrl,
+                status = excluded.status,
+                analysis = excluded.analysis
         `);
 
-        insertReceipt.run(id, req.userId, storeName, date, total, currency, savedImageUrl, status, createdAt || new Date().toISOString(), analysis || null);
+        upsertReceipt.run(id, req.userId, storeName, date, total, currency, savedImageUrl, status, createdAt || new Date().toISOString(), analysis || null);
 
         // Insert Items
         const insertItem = db.prepare(`
-            INSERT OR REPLACE INTO items (id, receiptId, name, price, description, nutrition, details)
+            INSERT INTO items (id, receiptId, name, price, description, nutrition, details)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                price = excluded.price,
+                description = excluded.description,
+                nutrition = excluded.nutrition,
+                details = excluded.details
         `);
 
         const deleteItems = db.prepare('DELETE FROM items WHERE receiptId = ?');
