@@ -1,14 +1,17 @@
 const API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL_ID = 'gemini-3-flash-preview';
 
-const SYSTEM_PROMPT = `
+function buildSystemPrompt(timezone) {
+    return `
 你是一位极其严谨的财务审计师和健康营养专家。你的任务是将小票图片转换为结构化的数据。
 
 ### 核心任务：
 1. **精准识别日期 (CRITICAL)**:
    - 必须提取小票上打印的**交易时间/打印时间**。
    - **绝对不要**使用"当前时间"或"上传时间"，除非小票上完全没有任何日期信息。
-   - 常见的日期格式包括：2024/01/16, 24年1月16日, Jan 16 2024, 16-01-2024 等。请将其统一转换为 ISO 格式 (YYYY-MM-DDTHH:mm:ss)。
+   - 小票上的时间是当地时间，用户时区为 ${timezone || 'Asia/Tokyo'}。
+   - 请将识别到的当地时间，按用户时区转换为带时区偏移的 ISO 格式。
+   - 例如：小票上显示 "15:20"，用户时区 Asia/Tokyo (UTC+9)，则输出 "2026-02-15T15:20:00+09:00"。
    - 如果年份缺失（如 "1月16日"），请基于当前日期推测最合理的年份。
 
 2. **商品识别与增强**:
@@ -26,7 +29,7 @@ const SYSTEM_PROMPT = `
 ### JSON 结构:
 {
   "storeName": "商店名称 (中文，如果小票是英文请翻译)",
-  "date": "YYYY-MM-DDTHH:mm:ss.sssZ (务必精准)",
+  "date": "YYYY-MM-DDTHH:mm:ss+HH:MM (带时区偏移，务必精准)",
   "currency": "货币符号",
   "total": 总金额 (数字),
   "items": [
@@ -40,6 +43,7 @@ const SYSTEM_PROMPT = `
   ]
 }
 `;
+}
 
 async function callGemini(contents, useSearch = false, thinkingLevel = 'LOW') {
     if (!API_KEY) throw new Error('GEMINI_API_KEY is missing on server');
@@ -79,13 +83,13 @@ async function callGemini(contents, useSearch = false, thinkingLevel = 'LOW') {
 }
 
 // OCR: image base64 -> structured receipt data
-export async function processReceiptImage(base64Image) {
+export async function processReceiptImage(base64Image, timezone) {
     const base64Data = base64Image.replace(/^data:image\/\w+;base64,/, '');
 
     const fullText = await callGemini([{
         role: 'user',
         parts: [
-            { text: SYSTEM_PROMPT },
+            { text: buildSystemPrompt(timezone) },
             { inlineData: { mimeType: 'image/jpeg', data: base64Data } }
         ]
     }], true);

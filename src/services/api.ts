@@ -119,9 +119,11 @@ export const api = {
 
     // Process receipt (server-side Gemini OCR + analysis)
     async processReceipt(id: string): Promise<{ receipt: Receipt; isDuplicate: boolean; duplicateStore?: string; duplicateDate?: string }> {
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
         const res = await fetch(`${API_BASE}/receipts/${id}/process`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+            body: JSON.stringify({ timezone }),
         });
         return handleResponse(res);
     }

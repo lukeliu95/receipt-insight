@@ -261,8 +261,9 @@ app.post('/api/receipts/:id/process', authMiddleware, async (req, res) => {
             imageData = `data:image/webp;base64,${fileBuffer.toString('base64')}`;
         }
 
-        // OCR with Gemini
-        const ocrResult = await processReceiptImage(imageData);
+        // OCR with Gemini (pass user timezone for correct date output)
+        const timezone = req.body.timezone || req.query.timezone || 'Asia/Tokyo';
+        const ocrResult = await processReceiptImage(imageData, timezone);
 
         // Dedup: check if a receipt with the same date already exists
         let finalId = id;
